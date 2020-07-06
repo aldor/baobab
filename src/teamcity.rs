@@ -1,5 +1,6 @@
 use crate::config;
 
+use log;
 use serde;
 use serde::Deserialize;
 
@@ -58,6 +59,7 @@ impl Client<'_> {
             Ok(text) => text,
             Err(error) => return Err(format!("failed to get resp body: {}", error)),
         };
+        log::debug!("got build {}", body);
         // println!("{}", body);
         let build: Build = match serde_json::from_str(body.as_str()) {
             Ok(build) => build,
