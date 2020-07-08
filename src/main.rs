@@ -5,6 +5,8 @@ mod teamcity;
 use std::thread;
 use std::time;
 
+use crossbeam;
+use crossbeam_channel;
 use indicatif;
 use log::LevelFilter;
 use log4rs;
@@ -19,28 +21,47 @@ fn main() {
     let config = config::read_config().expect("failed to read baobab config");
     let build_request =
         teamcity::BuildRequest::from_ui_url(&build_url).expect("failed to parse build url");
-    let client = teamcity::Client::new(build_request.api_url, &config);
+    let client = teamcity::Client::new(build_request.api_url.clone(), &config);
+    crossbeam::thread::scope(|scope| {
+        let (sender, receiver) = crossbeam_channel::unbounded();
+        scope.spawn(move |_| print_progress(receiver));
+        scope.spawn(move |_| {
+            loop {
+                // TODO: replace it with something like build.update(Self, client) -> Build?
+                let build = client
+                    .get_build(build_request.build_id)
+                    .expect("failed to get build"); // TODO: add retries
+                if build.state == "finished" {
+                    break;
+                }
+                sender.send(build).unwrap();
+                thread::sleep(time::Duration::from_secs(1));
+            }
+        });
+    })
+    .unwrap();
+}
+
+fn print_progress(build_channel: crossbeam_channel::Receiver<teamcity::Build>) {
     let progress_bar = indicatif::ProgressBar::new(100);
-    // todo: read terminal width from console::Term::size
     set_style(&progress_bar, None);
     loop {
-        // TODO: replace it with something like build.update(Self, client) -> Build?
-        let build = client
-            .get_build(build_request.build_id)
-            .expect("failed to get build"); // TODO: add retries
+        let build = build_channel.recv().unwrap();
         set_style(&progress_bar, Some(&build));
         match &build.running_info {
             Some(info) => {
-                progress_bar.set_message(info.current_stage_text.as_str());
+                progress_bar.set_message(&info.current_stage_text.as_str());
                 progress_bar.set_position(build.percentage_complete.unwrap_or(100) as u64)
             }
             None => {
                 progress_bar
-                    .set_message(format!("build is {} ({})", build.status, build.state).as_str());
+                    .set_message(&format!("build is {} ({})", build.status, build.state).as_str());
                 progress_bar.set_position(build.percentage_complete.unwrap_or(100) as u64);
             }
         };
-        thread::sleep(time::Duration::from_secs(1));
+        if build.state == "finished" {
+            break;
+        }
     }
 }
 
@@ -61,7 +82,7 @@ fn set_style(progress_bar: &indicatif::ProgressBar, build: Option<&teamcity::Bui
         }
     }
     let template = format!(
-        "{{spinner:.{}}} [{{elapsed_precise}}] [{{bar:40.cyan/blue}}] ({{eta}})\n{{msg:<79}}",
+        "{{spinner:.{}}} [{{elapsed_precise}}] [{{bar:40.cyan/blue}}] ({{eta}})\n{{wide_msg}}",
         &color
     );
     progress_bar.set_style(
@@ -90,7 +111,7 @@ fn init_logging() {
         .logger(
             Logger::builder()
                 .appender("logfile")
-                .build("app::backend::db", LevelFilter::Info),
+                .build("app::backend::db", LevelFilter::Trace),
         )
         .build(Root::builder().appender("logfile").build(LevelFilter::Warn))
         .unwrap();
