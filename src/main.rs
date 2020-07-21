@@ -1,7 +1,9 @@
 mod args;
 mod config;
+mod github;
 mod teamcity;
 
+use std::env;
 use std::thread;
 use std::time;
 
@@ -13,8 +15,24 @@ use log4rs;
 use log4rs::append::rolling_file::policy::compound;
 use log4rs::append::rolling_file::RollingFileAppender;
 use log4rs::config::{Appender, Config, Logger, Root};
+use notify_rust::Notification;
 
 fn main() {
+    let github_client = github::Client::new(env::var("GITHUB_HOST").unwrap().to_owned());
+    let mut resp = github_client
+        .search_open_user_pull_requests("seanchaidh")
+        .unwrap();
+    print!("{:?}\n", resp.response);
+    print!("Link: {:?}\n", resp.link);
+    loop {
+        for issue in resp.issues() {
+            println!("{:?}", issue);
+        }
+        resp = match resp.next_page() {
+            None => break,
+            Some(result) => result.expect("failed to get prs"),
+        };
+    }
     let args = args::parse_args();
     let build_url = args.url;
     init_logging();
@@ -31,10 +49,11 @@ fn main() {
                 let build = client
                     .get_build(build_request.build_id)
                     .expect("failed to get build"); // TODO: add retries
-                if build.state == "finished" {
+                let to_break = build.state == "finished";
+                sender.send(build).unwrap();
+                if to_break {
                     break;
                 }
-                sender.send(build).unwrap();
                 thread::sleep(time::Duration::from_secs(1));
             }
         });
@@ -60,6 +79,7 @@ fn print_progress(build_channel: crossbeam_channel::Receiver<teamcity::Build>) {
             }
         };
         if build.state == "finished" {
+            notify_build(&build);
             break;
         }
     }
@@ -116,4 +136,16 @@ fn init_logging() {
         .build(Root::builder().appender("logfile").build(LevelFilter::Warn))
         .unwrap();
     log4rs::init_config(config).unwrap();
+}
+
+fn notify_build(_build: &teamcity::Build) {
+    match Notification::new()
+        .summary("Firefox News")
+        .body("This will almost look like a real firefox notification.")
+        .icon("firefox")
+        .show()
+    {
+        Ok(_) => return,
+        Err(err) => log::error!("notification failed: {}", err),
+    };
 }
