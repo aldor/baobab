@@ -3,7 +3,6 @@ mod config;
 mod github;
 mod teamcity;
 
-use std::env;
 use std::thread;
 use std::time;
 
@@ -18,24 +17,9 @@ use log4rs::config::{Appender, Config, Logger, Root};
 use notify_rust::Notification;
 
 fn main() {
-    let github_client = github::Client::new(env::var("GITHUB_HOST").unwrap().to_owned());
-    let mut resp = github_client
-        .search_open_user_pull_requests("seanchaidh")
-        .unwrap();
-    print!("{:?}\n", resp.response);
-    print!("Link: {:?}\n", resp.link);
-    loop {
-        for issue in resp.issues() {
-            println!("{:?}", issue);
-        }
-        resp = match resp.next_page() {
-            None => break,
-            Some(result) => result.expect("failed to get prs"),
-        };
-    }
+    init_logging();
     let args = args::parse_args();
     let build_url = args.url;
-    init_logging();
     let config = config::read_config().expect("failed to read baobab config");
     let build_request =
         teamcity::BuildRequest::from_ui_url(&build_url).expect("failed to parse build url");
@@ -131,7 +115,7 @@ fn init_logging() {
         .logger(
             Logger::builder()
                 .appender("logfile")
-                .build("app::backend::db", LevelFilter::Trace),
+                .build("baobab", LevelFilter::Debug),
         )
         .build(Root::builder().appender("logfile").build(LevelFilter::Warn))
         .unwrap();

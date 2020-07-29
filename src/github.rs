@@ -1,6 +1,32 @@
 use anyhow::Context;
 use serde::Deserialize;
 
+const LINK_HEADER_NAME: &str = "Link";
+
+trait LogResponse<T> {
+    fn unwrap_200(self) -> anyhow::Result<T>;
+}
+
+impl LogResponse<reqwest::blocking::Response> for reqwest::Result<reqwest::blocking::Response> {
+    fn unwrap_200(self) -> anyhow::Result<reqwest::blocking::Response> {
+        let response = self.with_context(|| "request failed")?;
+        let status = response.status();
+        log::info!("response to {} got {}", response.url(), status);
+        if status != 200 {
+            let body_log = match response.text() {
+                Ok(body) => format!("body: {}", body),
+                Err(err) => format!("failed to read body: {}", err),
+            };
+            return Err(anyhow::anyhow!(
+                "request failed, status: {}, {}",
+                status,
+                body_log
+            ));
+        }
+        Ok(response)
+    }
+}
+
 #[derive(Debug)]
 pub struct Client {
     host: String,
@@ -15,39 +41,65 @@ impl Client {
         }
     }
 
-    pub fn search_open_user_pull_requests(&self, username: &str) -> anyhow::Result<IssuesRequest> {
+    /// Get open pull requests by user
+    ///
+    /// # Examples:
+    ///
+    /// ```
+    /// let github_client = github::Client::new(env::var("GITHUB_HOST").unwrap().to_owned());
+    /// let mut resp = github_client
+    ///     .get_open_user_pull_requests("seanchaidh")
+    ///     .unwrap();
+    /// print!("{:?}\n", resp.response);
+    /// print!("Link: {:?}\n", resp.link);
+    /// loop {
+    ///     for issue in resp.issues() {
+    ///         println!("{:?}", issue);
+    ///     }
+    ///     resp = match resp.next_page() {
+    ///         None => break,
+    ///         Some(result) => result.expect("failed to get prs"),
+    ///     };
+    /// }
+    /// ```
+
+    pub fn get_open_user_pull_requests(
+        &self,
+        username: &str,
+    ) -> anyhow::Result<IssuesSearchResult> {
+        let url = format!(
+            "{}/api/v3/search/issues?q=author:{}+is:open+is:pr+archived:false",
+            self.host, username
+        );
         let response = self
-            .client
-            .get(&format!(
-                "{}/api/v3/search/issues?q=author:{}",
-                self.host, username
-            ))
+            .request(reqwest::Method::GET, &url)
             .send()
-            .with_context(|| "request for opened pull requests failed!")?;
+            .unwrap_200()?;
         self.parse_issues_request(response)
+    }
+
+    fn request(&self, method: reqwest::Method, url: &str) -> reqwest::blocking::RequestBuilder {
+        log::info!("requesting {} {}", method, url);
+        self.client.request(method, url)
     }
 
     fn parse_issues_request(
         &self,
         response: reqwest::blocking::Response,
-    ) -> anyhow::Result<IssuesRequest> {
-        let link: Option<String> = match response.headers().get("Link") {
+    ) -> anyhow::Result<IssuesSearchResult> {
+        let link: Option<String> = match response.headers().get(LINK_HEADER_NAME) {
             Some(header) => Some(
                 header
                     .to_str()
-                    .with_context(|| "failed to parse Link header")?
+                    .with_context(|| format!("failed to parse {} header", LINK_HEADER_NAME))?
                     .to_owned(),
             ),
             None => None,
         };
-        // let _link = link.map(parse_link);
-        // let link = parse_link(link);
-        let body = response
-            .text()
-            .with_context(|| "failed to parse pull requests search body")?;
+        let body = response.text().with_context(|| "failed to parse body")?;
         let response: IssuesResponse =
-            serde_json::from_str(&body).with_context(|| "failed to parse body")?;
-        Ok(IssuesRequest {
+            serde_json::from_str(&body).with_context(|| "failed to parse issues response body")?;
+        Ok(IssuesSearchResult {
             client: &self,
             response,
             link: link.map(parse_link),
@@ -62,7 +114,7 @@ pub struct IssuesResponse {
     items: Vec<Issue>,
 }
 
-pub struct IssuesRequest<'a> {
+pub struct IssuesSearchResult<'a> {
     client: &'a Client,
     pub response: IssuesResponse,
     pub link: Option<Link>,
@@ -82,21 +134,21 @@ fn parse_link(link: String) -> Link {
         assert!(parts.len() == 2);
         let url = &parts[0][1..parts[0].len() - 1];
         if parts[1] == "rel=\"next\"" {
-            next = Some(url.to_string());
+            next = Some(url.to_owned());
         }
         if parts[1] == "rel=\"prev\"" {
-            prev = Some(url.to_string());
+            prev = Some(url.to_owned());
         }
     }
     Link { prev, next }
 }
 
-impl<'a> IssuesRequest<'a> {
+impl<'a> IssuesSearchResult<'a> {
     pub fn issues(&self) -> &Vec<Issue> {
         &self.response.items
     }
 
-    pub fn next_page(self) -> Option<anyhow::Result<IssuesRequest<'a>>> {
+    pub fn next_page(self) -> Option<anyhow::Result<IssuesSearchResult<'a>>> {
         let url = match self.link {
             Some(Link {
                 prev: _,
@@ -104,12 +156,7 @@ impl<'a> IssuesRequest<'a> {
             }) => url,
             _ => return None,
         };
-        let response = self
-            .client
-            .client
-            .get(&url)
-            .send()
-            .with_context(|| "request for opened pull requests failed!");
+        let response = self.client.client.get(&url).send().unwrap_200();
         match response {
             Ok(response) => Some(self.client.parse_issues_request(response)),
             Err(err) => Some(Err(err)),
