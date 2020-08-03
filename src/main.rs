@@ -6,11 +6,7 @@ mod teamcity;
 use std::thread;
 use std::time;
 
-use crossbeam;
-use crossbeam_channel;
-use indicatif;
 use log::LevelFilter;
-use log4rs;
 use log4rs::append::rolling_file::policy::compound;
 use log4rs::append::rolling_file::RollingFileAppender;
 use log4rs::config::{Appender, Config, Logger, Root};
@@ -122,14 +118,17 @@ fn init_logging() {
     log4rs::init_config(config).unwrap();
 }
 
-fn notify_build(_build: &teamcity::Build) {
-    match Notification::new()
-        .summary("Firefox News")
-        .body("This will almost look like a real firefox notification.")
-        .icon("firefox")
-        .show()
-    {
-        Ok(_) => return,
+fn notify_build(build: &teamcity::Build) {
+    let mut notification = Notification::new();
+    if build.status == "SUCCESS" {
+        notification.summary("Build finished successfully :)");
+    } else if build.status == "FAILURE" {
+        notification.summary("Build failed :(");
+    } else {
+        notification.summary("Build finished?");
+    }
+    match notification.show() {
+        Ok(_) => {}
         Err(err) => log::error!("notification failed: {}", err),
     };
 }
