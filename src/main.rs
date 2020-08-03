@@ -1,23 +1,21 @@
 mod args;
 mod config;
+mod github;
 mod teamcity;
 
 use std::thread;
 use std::time;
 
-use crossbeam;
-use crossbeam_channel;
-use indicatif;
 use log::LevelFilter;
-use log4rs;
 use log4rs::append::rolling_file::policy::compound;
 use log4rs::append::rolling_file::RollingFileAppender;
 use log4rs::config::{Appender, Config, Logger, Root};
+use notify_rust::Notification;
 
 fn main() {
+    init_logging();
     let args = args::parse_args();
     let build_url = args.url;
-    init_logging();
     let config = config::read_config().expect("failed to read baobab config");
     let build_request =
         teamcity::BuildRequest::from_ui_url(&build_url).expect("failed to parse build url");
@@ -31,10 +29,11 @@ fn main() {
                 let build = client
                     .get_build(build_request.build_id)
                     .expect("failed to get build"); // TODO: add retries
-                if build.state == "finished" {
+                let to_break = build.state == "finished";
+                sender.send(build).unwrap();
+                if to_break {
                     break;
                 }
-                sender.send(build).unwrap();
                 thread::sleep(time::Duration::from_secs(1));
             }
         });
@@ -60,6 +59,7 @@ fn print_progress(build_channel: crossbeam_channel::Receiver<teamcity::Build>) {
             }
         };
         if build.state == "finished" {
+            notify_build(&build);
             break;
         }
     }
@@ -111,9 +111,24 @@ fn init_logging() {
         .logger(
             Logger::builder()
                 .appender("logfile")
-                .build("app::backend::db", LevelFilter::Trace),
+                .build("baobab", LevelFilter::Debug),
         )
         .build(Root::builder().appender("logfile").build(LevelFilter::Warn))
         .unwrap();
     log4rs::init_config(config).unwrap();
+}
+
+fn notify_build(build: &teamcity::Build) {
+    let mut notification = Notification::new();
+    if build.status == "SUCCESS" {
+        notification.summary("Build finished successfully :)");
+    } else if build.status == "FAILURE" {
+        notification.summary("Build failed :(");
+    } else {
+        notification.summary("Build finished?");
+    }
+    match notification.show() {
+        Ok(_) => {}
+        Err(err) => log::error!("notification failed: {}", err),
+    };
 }
